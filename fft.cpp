@@ -36,7 +36,7 @@ std::vector<long long> mfft(std::vector<long long> dat, long long one, long long
 std::vector<long long> mult(std::vector<long long> a, std::vector<long long> b) {
     long long root = 9, invroot = 3502799710177053, module = 7881299347898369, degree = 49, degreeinv = 7881299347898355;  // settings
 
-    long long len = max(a.size(), b.size());
+    long long len = std::max(a.size(), b.size());
     while (len & (len - 1))  // upper 2-th power
         len &= len - 1;
     long long lenpw = 2;
