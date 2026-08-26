@@ -1,3 +1,18 @@
+# Parameter sets for modular FFT (NTT) transforms, one set per line:
+#
+#   Prime i j {root, 1/root} 1/2^i
+#
+# where Prime = 1 + j*2^i is prime, `root` has multiplicative order 2^i
+# modulo Prime, 1/root is its modular inverse, and 1/2^i is the inverse of
+# 2^i modulo Prime (the normalisation factor of the inverse transform).
+#
+# In code you only need (Prime, root, i): pass them to
+# modularfft::make_params(prime, root, i). The inverses are derived
+# automatically.
+#
+# Only rows whose Prime fits in a signed 64-bit integer (Prime < 2^63) can
+# be used with the library; rows near the end of this file exceed that.
+
 Prime=1+j*2^i	i	j	{root, 1/root}	1/2^i
 5 2 1 {2,3} 4
 17 3 2 {2,9} 15

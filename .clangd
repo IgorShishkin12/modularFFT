@@ -1,0 +1,12 @@
+# Fallback flags so editor tooling works on a fresh clone, before any cmake
+# build has produced compile_commands.json (clangd also finds build/ one once
+# it exists). Relative -I paths resolve against each source file's directory,
+# hence both depths.
+CompileFlags:
+  Add:
+    - -std=c++17
+    - -Iinclude
+    - -I../include
+
+Diagnostics:
+  UnusedIncludes: None  # the library header provides value_t etc.; direct-use hints are noise
