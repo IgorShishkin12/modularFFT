@@ -81,13 +81,96 @@ rows near the end of the file exceed that.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure   # unit tests
-./build/bench_multiply                       # timing table
+./build/bench_multiply                       # NTT vs schoolbook timing table
+./build/bench_complex_fft                    # NTT vs complex-double FFT timing + accuracy
 ```
 
 Tests check known products against hand-computed answers, random polynomials against a
-schoolbook O(n²) reference, `intt(ntt(x)) == x` round-trips, and the error paths. The
-benchmark compares NTT multiplication with schoolbook multiplication across operand sizes.
+schoolbook O(n²) reference, `intt(ntt(x)) == x` round-trips, and the error paths.
+`bench_multiply` compares NTT multiplication with schoolbook multiplication across operand
+sizes. `bench_complex_fft` compares it against how convolution is usually done in
+practice — FFT over `std::complex<double>` — using a vendored dependency-free FFT (always
+built) and, if `libfftw3-dev` is installed (`fftw3.h` and `libfftw3` found at configure
+time; e.g. `apt install libfftw3-dev` / `brew install fftw`), FFTW3 too. Alongside speed it
+reports max rounding error against modularFFT's exact result, since double-precision FFT
+convolution eventually mis-rounds as operand size and coefficient magnitude grow, while the
+NTT never does.
+
 Each can be disabled with `MODULARFFT_BUILD_{EXAMPLES,TESTS,BENCHMARKS}=OFF`.
+
+### Example results
+
+From a dev machine (Release build, single-threaded throughout — numbers will vary on yours):
+
+```
+$ ./build/bench_multiply
+      n  ntt ms/op  ns/coef  naive ms/op  speedup
+    256      1.051 4106.820        1.023    0.973x
+   1024      3.164 3090.325        5.001    1.580x
+   4096      7.941 1938.786       78.798    9.923x
+  16384     36.738 2242.313            -         -
+  65536    172.248 2628.303            -         -
+ 262144    719.143 2743.313            -         -
+1048576   3155.127 3008.963            -         -
+
+$ ./build/bench_complex_fft
+-- speed: ntt vs complex-fft engines --
+      n  ntt ms/op  ref ms/op  ref speedup  fftw ms/op  fftw speedup
+    256      0.494      0.075       0.151x       0.053        0.107x
+   1024      2.191      0.293       0.134x       0.081        0.037x
+   4096      7.989      1.455       0.182x       0.419        0.053x
+  16384     35.753      6.779       0.190x       1.724        0.048x
+  65536    159.153     32.130       0.202x       9.862        0.062x
+ 262144    689.319    144.156       0.209x      28.473        0.041x
+1048576   3061.535    630.050       0.206x     169.970        0.056x
+
+-- accuracy: max |error| vs exact NTT result, coefficients [0, 999] --
+      n  ref max err  fftw max err
+    256            0             0
+   1024            0             0
+   4096            0             0
+  16384            0             0
+  65536            0             0
+ 262144            0             0
+1048576            4             0
+4194304           96             0
+
+-- scaling limits: first n with a rounding error, by coefficient magnitude --
+  magnitude   ref first-error n  fftw first-error n
+         10                   -                    -
+        100             4194304                    -
+       1000              524288                    -
+      10000               32768                    -
+     100000                8192               524288
+    1000000                 512                 8192
+   10000000                  32                  128
+  100000000                   8                    4
+ 1000000000                   4                    4
+```
+
+The third table is the direct answer to "where does this stop scaling": coefficients here
+are `long long`, not digits, and modularFFT's own ceiling comes from its modulus, not from
+transform size — so the sweep uses the largest prime in `data/primes.txt` that still fits a
+signed 64-bit integer (`4179340454199820289`, supporting transforms up to 2^57 points) and
+finds, for each coefficient magnitude, the smallest operand size at which each complex-FFT
+engine first mis-rounds a coefficient. Two things fall out of it:
+
+- The crossover point collapses fast as magnitude grows. At magnitude 10 (single-digit) even
+  4M-point transforms stayed exact; by magnitude 10⁹ — a plausible base-2^30-ish limb size
+  for bignum arithmetic, and still far below what a 64-bit coefficient can hold — both
+  engines fail at n = 4, the smallest size tested.
+- FFTW's numerics are meaningfully better than the vendored radix-2 FFT (it holds out to a
+  larger n at every magnitude where both eventually fail), but the trend is the same: past
+  some scale, floating-point convolution is *always* wrong somewhere, regardless of
+  implementation quality. NTT has no such ceiling — it's either usable at a given size (fits
+  under the chosen prime) or it throws, never silently wrong.
+
+Takeaways: this NTT implementation is currently *slower* than both complex-FFT engines at
+every size tested — FFTW in particular is 15-30x faster single-threaded, so raw throughput
+is not (yet) the pitch. What NTT buys you is exactness: the vendored complex FFT already
+mis-rounds three-digit coefficients at n ≥ 2^20, while FFTW's more careful numerics held up
+through n = 4194304 there. That gap collapses fast with coefficient magnitude, as the
+scaling-limits table above shows.
 
 ## License
 

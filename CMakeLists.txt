@@ -37,4 +37,21 @@ if(MODULARFFT_BUILD_BENCHMARKS)
     add_executable(bench_multiply benchmarks/bench_multiply.cpp)
     target_link_libraries(bench_multiply PRIVATE modularfft)
     target_compile_options(bench_multiply PRIVATE ${MODULARFFT_WARNING_FLAGS})
+
+    add_executable(bench_complex_fft benchmarks/bench_complex_fft.cpp)
+    target_link_libraries(bench_complex_fft PRIVATE modularfft)
+    target_compile_options(bench_complex_fft PRIVATE ${MODULARFFT_WARNING_FLAGS})
+
+    # FFTW3 is optional: no FindFFTW3 module ships with CMake and distro
+    # packaging of a FFTW3Config.cmake/pkg-config file is inconsistent, so
+    # look for the library and header directly instead.
+    find_library(FFTW3_LIB fftw3)
+    find_path(FFTW3_INCLUDE_DIR fftw3.h)
+    if(FFTW3_LIB AND FFTW3_INCLUDE_DIR)
+        target_include_directories(bench_complex_fft PRIVATE ${FFTW3_INCLUDE_DIR})
+        target_link_libraries(bench_complex_fft PRIVATE ${FFTW3_LIB})
+        target_compile_definitions(bench_complex_fft PRIVATE MODULARFFT_HAVE_FFTW3)
+    else()
+        message(STATUS "FFTW3 not found; bench_complex_fft will skip the FFTW3 comparison")
+    endif()
 endif()
