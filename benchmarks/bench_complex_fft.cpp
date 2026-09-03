@@ -264,6 +264,122 @@ int main() {
         std::cout << '\n';
     }
 
+    // Equal digit-budget comparison: fix magnitude * n = C (a stand-in for
+    // "total size of the big number being multiplied") and sweep how that
+    // budget is split between element count and element size. Since NTT is
+    // exact regardless of base, it can always take the smallest-n/largest-
+    // magnitude split (fewest, biggest limbs — the fastest split, since
+    // work is O(n log n)); a float FFT engine can only take that split if
+    // it still rounds correctly there, which for large elements it usually
+    // doesn't. This finds each engine's biggest *reliably correct* element
+    // size at this budget (worst case over a few trials, since the
+    // rounding failures cluster probabilistically near the margin rather
+    // than at a clean cutoff) and times NTT/ref/FFTW at every split so the
+    // real cost of "playing it safe" with small elements is visible.
+    constexpr long long kDigitBudget = 400000000; // magnitude * n
+    constexpr int kTrialsPerPoint = 3;   // correctness trials (worst case counts)
+    constexpr int kTimingRepeats = 3;    // separate median_ms() repeats for the ms/op columns
+    constexpr std::size_t kBudgetSizes[] = {4,     16,    64,     256,    1024,
+                                             4096,  16384, 65536,  262144, 1048576};
+
+    std::cout << "\n-- equal digit-budget (magnitude * n = " << kDigitBudget
+              << "): split between element size and count --\n";
+    std::cout << "      n  magnitude  ntt ms/op  ref ms/op  ref ok  fftw ms/op  fftw ok\n";
+
+    std::size_t ntt_smallest_n = 0;
+    double ntt_smallest_n_ms = 0.0;
+    std::size_t ref_biggest_correct_n = 0;
+    double ref_biggest_correct_ms = 0.0;
+    [[maybe_unused]] std::size_t fftw_biggest_correct_n = 0;
+    [[maybe_unused]] double fftw_biggest_correct_ms = 0.0;
+
+    for (std::size_t n : kBudgetSizes) {
+        const modularfft::value_t magnitude =
+            std::max<modularfft::value_t>(2, kDigitBudget / static_cast<modularfft::value_t>(n));
+        const __int128 bound = static_cast<__int128>(n) * (magnitude - 1) * (magnitude - 1);
+        if (bound >= static_cast<__int128>(big_params.modulus)) {
+            continue; // would wrap our own ground truth; skip
+        }
+
+        const auto a0 = random_poly(rng, magnitude, n);
+        const auto b0 = random_poly(rng, magnitude, n);
+        const std::vector<std::int64_t> a0_64(a0.begin(), a0.end());
+        const std::vector<std::int64_t> b0_64(b0.begin(), b0.end());
+        const double ntt_ms = median_ms(kTimingRepeats, [&] {
+            sink += modularfft::poly_multiply(a0, b0, big_params).front();
+        });
+        const double ref_ms = median_ms(
+            kTimingRepeats, [&] { sink += complex_fft_ref::convolve(a0_64, b0_64).front(); });
+#ifdef MODULARFFT_HAVE_FFTW3
+        const double fftw_ms = median_ms(
+            kTimingRepeats, [&] { sink += fftw_convolve(a0_64, b0_64).front(); });
+#endif
+
+        bool ref_ok = true;
+#ifdef MODULARFFT_HAVE_FFTW3
+        bool fftw_ok = true;
+#endif
+        for (int trial = 0; trial < kTrialsPerPoint; ++trial) {
+            const auto a = random_poly(rng, magnitude, n);
+            const auto b = random_poly(rng, magnitude, n);
+            const auto exact = modularfft::poly_multiply(a, b, big_params);
+            std::vector<std::int64_t> a64(a.begin(), a.end());
+            std::vector<std::int64_t> b64(b.begin(), b.end());
+
+            if (max_abs_error(exact, complex_fft_ref::convolve(a64, b64)) > 0) {
+                ref_ok = false;
+            }
+#ifdef MODULARFFT_HAVE_FFTW3
+            if (max_abs_error(exact, fftw_convolve(a64, b64)) > 0) {
+                fftw_ok = false;
+            }
+#endif
+        }
+
+        if (ntt_smallest_n == 0) {
+            ntt_smallest_n = n;
+            ntt_smallest_n_ms = ntt_ms;
+        }
+        if (ref_ok && ref_biggest_correct_n == 0) {
+            ref_biggest_correct_n = n;
+            ref_biggest_correct_ms = ref_ms;
+        }
+#ifdef MODULARFFT_HAVE_FFTW3
+        if (fftw_ok && fftw_biggest_correct_n == 0) {
+            fftw_biggest_correct_n = n;
+            fftw_biggest_correct_ms = fftw_ms;
+        }
+#endif
+
+        std::cout << std::setw(7) << n << std::setw(11) << magnitude << std::setw(11) << ntt_ms
+                  << std::setw(11) << ref_ms << std::setw(8) << (ref_ok ? "yes" : "no");
+#ifdef MODULARFFT_HAVE_FFTW3
+        std::cout << std::setw(12) << fftw_ms << std::setw(8) << (fftw_ok ? "yes" : "no");
+#else
+        std::cout << std::setw(12) << '-' << std::setw(8) << '-';
+#endif
+        std::cout << '\n';
+    }
+
+    std::cout << "\nNTT at its biggest possible element size (n=" << ntt_smallest_n
+              << "): " << ntt_smallest_n_ms << " ms\n";
+    if (ref_biggest_correct_n != 0) {
+        std::cout << "vendored FFT at its biggest *correct* element size (n="
+                  << ref_biggest_correct_n << "): " << ref_biggest_correct_ms << " ms ("
+                  << ref_biggest_correct_ms / ntt_smallest_n_ms << "x NTT's time)\n";
+    } else {
+        std::cout << "vendored FFT: never reliably correct in this range\n";
+    }
+#ifdef MODULARFFT_HAVE_FFTW3
+    if (fftw_biggest_correct_n != 0) {
+        std::cout << "FFTW3 at its biggest *correct* element size (n=" << fftw_biggest_correct_n
+                  << "): " << fftw_biggest_correct_ms << " ms ("
+                  << fftw_biggest_correct_ms / ntt_smallest_n_ms << "x NTT's time)\n";
+    } else {
+        std::cout << "FFTW3: never reliably correct in this range\n";
+    }
+#endif
+
     std::cout << "\n(checksum " << sink << ", ignore)\n";
     return 0;
 }

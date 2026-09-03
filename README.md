@@ -100,7 +100,8 @@ Each can be disabled with `MODULARFFT_BUILD_{EXAMPLES,TESTS,BENCHMARKS}=OFF`.
 
 ### Example results
 
-From a dev machine (Release build, single-threaded throughout — numbers will vary on yours):
+From a container build (Release, single-threaded throughout, FFTW3 present — numbers will
+vary on your machine):
 
 ```
 $ ./build/bench_multiply
@@ -116,13 +117,13 @@ $ ./build/bench_multiply
 $ ./build/bench_complex_fft
 -- speed: ntt vs complex-fft engines --
       n  ntt ms/op  ref ms/op  ref speedup  fftw ms/op  fftw speedup
-    256      0.494      0.075       0.151x       0.053        0.107x
-   1024      2.191      0.293       0.134x       0.081        0.037x
-   4096      7.989      1.455       0.182x       0.419        0.053x
-  16384     35.753      6.779       0.190x       1.724        0.048x
-  65536    159.153     32.130       0.202x       9.862        0.062x
- 262144    689.319    144.156       0.209x      28.473        0.041x
-1048576   3061.535    630.050       0.206x     169.970        0.056x
+    256      0.180      0.029       0.160x       0.023        0.130x
+   1024      0.942      0.138       0.146x       0.040        0.043x
+   4096      3.986      0.721       0.181x       0.218        0.055x
+  16384     17.828      3.390       0.190x       0.882        0.049x
+  65536     80.206     16.340       0.204x       4.923        0.061x
+ 262144    350.257     75.116       0.214x      15.347        0.044x
+1048576   1549.432    342.519       0.221x      98.904        0.064x
 
 -- accuracy: max |error| vs exact NTT result, coefficients [0, 999] --
       n  ref max err  fftw max err
@@ -141,36 +142,60 @@ $ ./build/bench_complex_fft
         100             4194304                    -
        1000              524288                    -
       10000               32768                    -
-     100000                8192               524288
+     100000                8192               262144
     1000000                 512                 8192
-   10000000                  32                  128
+   10000000                  32                   64
   100000000                   8                    4
  1000000000                   4                    4
+
+-- equal digit-budget (magnitude * n = 400000000): split between element size and count --
+      n  magnitude  ntt ms/op  ref ms/op  ref ok  fftw ms/op  fftw ok
+      4  100000000      0.003      0.000      no       0.004      no
+     16   25000000      0.010      0.001      no       0.005      no
+     64    6250000      0.040      0.006      no       0.028     yes
+    256    1562500      0.184      0.030      no       0.026     yes
+   1024     390625      0.857      0.141     yes       0.050     yes
+   4096      97656      3.822      0.684     yes       0.185     yes
+  16384      24414     17.357      3.184      no       0.622     yes
+  65536       6103     76.956     15.430      no       4.083     yes
+ 262144       1525    343.328     70.175      no      15.498     yes
+1048576        381   1552.982    342.957      no     103.272     yes
+
+NTT at its biggest possible element size (n=4): 0.003 ms
+vendored FFT at its biggest *correct* element size (n=1024): 0.141 ms (44.535x NTT's time)
+FFTW3 at its biggest *correct* element size (n=64): 0.028 ms (8.767x NTT's time)
 ```
 
-The third table is the direct answer to "where does this stop scaling": coefficients here
-are `long long`, not digits, and modularFFT's own ceiling comes from its modulus, not from
-transform size — so the sweep uses the largest prime in `data/primes.txt` that still fits a
-signed 64-bit integer (`4179340454199820289`, supporting transforms up to 2^57 points) and
-finds, for each coefficient magnitude, the smallest operand size at which each complex-FFT
-engine first mis-rounds a coefficient. Two things fall out of it:
+Takeaways: this NTT implementation is *slower* than both complex-FFT engines at every fixed
+size tested — FFTW in particular is 15-30x faster single-threaded, so raw per-transform
+throughput is not (yet) the pitch. Three things NTT buys instead:
 
-- The crossover point collapses fast as magnitude grows. At magnitude 10 (single-digit) even
-  4M-point transforms stayed exact; by magnitude 10⁹ — a plausible base-2^30-ish limb size
-  for bignum arithmetic, and still far below what a 64-bit coefficient can hold — both
-  engines fail at n = 4, the smallest size tested.
-- FFTW's numerics are meaningfully better than the vendored radix-2 FFT (it holds out to a
-  larger n at every magnitude where both eventually fail), but the trend is the same: past
-  some scale, floating-point convolution is *always* wrong somewhere, regardless of
-  implementation quality. NTT has no such ceiling — it's either usable at a given size (fits
-  under the chosen prime) or it throws, never silently wrong.
-
-Takeaways: this NTT implementation is currently *slower* than both complex-FFT engines at
-every size tested — FFTW in particular is 15-30x faster single-threaded, so raw throughput
-is not (yet) the pitch. What NTT buys you is exactness: the vendored complex FFT already
-mis-rounds three-digit coefficients at n ≥ 2^20, while FFTW's more careful numerics held up
-through n = 4194304 there. That gap collapses fast with coefficient magnitude, as the
-scaling-limits table above shows.
+- **Exactness, unconditionally.** The vendored complex FFT already mis-rounds three-digit
+  coefficients by n = 2^20; FFTW's better numerics held up through n = 4194304 here, but the
+  scaling-limits table shows that's a matter of degree, not kind — push coefficient magnitude
+  toward what a 64-bit value can actually hold and both engines fail at the smallest size
+  tested. NTT is either usable at a given size (fits under the chosen prime) or throws; it is
+  never silently wrong.
+- **Where each engine fails is genuinely unpredictable, not a clean cutoff.** The equal
+  digit-budget table fixes the total "size" of the number being multiplied
+  (`magnitude * n = const`) and sweeps how that budget is split between element count and
+  element size. The vendored FFT is only reliably correct in a narrow band (n = 1024–4096
+  here) — it fails both *below* it (too few, too-large elements overflow double's exact
+  range) and *above* it (too many elements accumulate rounding error), i.e. correctness isn't
+  monotonic in element size. FFTW is more robust (correct from n = 64 upward, no failure band
+  reappearing at large n in this run) but the failure mode itself — small, magnitude-
+  dependent, and sensitive to the actual random data rather than a hard threshold — is the
+  same *kind* of problem for both.
+- **The real payoff shows up when both sides play by the same total-size budget.** Since NTT
+  doesn't care about base, it can take the fastest split (fewest, biggest limbs) outright; a
+  complex-FFT engine can only take that split if it's still correct there, which usually means
+  falling back to many small limbs — and paying for it. Here NTT's fastest-possible split
+  (n = 4, 0.003 ms) beat FFTW's biggest *reliably correct* split (n = 64, 0.028 ms) by ~9x,
+  and beat the vendored FFT's by ~45x — despite NTT losing every fixed-size, same-n
+  comparison in the first table. Constrained to answers it can actually trust, "popular
+  library" FFT convolution loses its speed advantage for big-number multiplication; NTT's
+  ceiling only comes from the modulus, so it can spend the whole budget on fewer, bigger
+  limbs and get there directly.
 
 ## License
 
